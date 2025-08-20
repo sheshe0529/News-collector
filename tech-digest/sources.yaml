@@ -1,0 +1,23 @@
+# Fuentes RSS sugeridas (puedes añadir/quitar)
+# Formato: lista de objetos con 'name' y 'url'
+feeds:
+  - name: Ars Technica - IT
+    url: https://feeds.arstechnica.com/arstechnica/technology-lab
+  - name: The Register
+    url: https://www.theregister.com/headlines.atom
+  - name: Phoronix
+    url: https://www.phoronix.com/rss.php
+  - name: DistroWatch
+    url: https://distrowatch.com/news/dwd.xml
+  - name: Windows Insider Blog
+    url: https://blogs.windows.com/windows-insider/feed/
+  - name: Microsoft Security Blog
+    url: https://www.microsoft.com/en-us/security/blog/feed/
+  - name: Red Hat Blog
+    url: https://www.redhat.com/en/rss/blog
+  - name: Kubernetes Blog
+    url: https://kubernetes.io/feed.xml
+  - name: Cloudflare Blog
+    url: https://blog.cloudflare.com/feed.xml
+  - name: Google Cloud Blog
+    url: https://cloud.google.com/blog/rss/
