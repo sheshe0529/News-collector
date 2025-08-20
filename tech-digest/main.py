@@ -1,166 +1,123 @@
-import os
-import re
-import time
-import textwrap
-import hashlib
-import feedparser
-import yaml
-from datetime import datetime, timezone
+import os, re, time, hashlib, feedparser, yaml
+from datetime import datetime
 from dotenv import load_dotenv
-
-# --- Opcional LLM ---
-USE_LLM = False
-try:
-    import requests
-    if os.getenv("OPENAI_API_KEY"):
-        USE_LLM = True
-except Exception:
-    USE_LLM = False
-
 from whatsapp import send_whatsapp
 
 load_dotenv()
 
-MAX_ITEMS = 10  # máximo de notas en el resumen
-SUMMARY_LEN = 4  # nº de bullets en TL;DR aproximado
-
-def slug(s: str) -> str:
-    return re.sub(r"\W+", "-", s.lower()).strip("-")
+# ====== Ajusta aquí tus preferencias ======
+MAX_ITEMS = 4                    # 4 bullets para no pasar el límite del Sandbox
+KEYWORDS = {
+    # SO / Linux / Windows
+    "linux","kernel","ubuntu","debian","fedora","arch","red hat","windows","microsoft",
+    # Infra / Cloud / DevOps
+    "kubernetes","docker","container","cloud","aws","azure","gcp","security","vulnerability","patch",
+    # Hardware
+    "cpu","gpu","intel","amd","nvidia","epyc","ryzen","xeon",
+    # IA / Software
+    "ai","machine learning","llm","model","open source","driver","release","update"
+}
+# ==========================================
 
 def clean_html(s: str) -> str:
-    # Eliminamos HTML básico y normalizamos espacios
     s = re.sub(r"<[^>]+>", "", s or "")
     return re.sub(r"\s+", " ", s).strip()
 
-def simple_score(item):
-    # Priorizamos fuentes técnicas y títulos con palabras clave
-    title = (item.get("title") or "").lower()
-    score = 0
-    for kw in ["linux", "windows", "kernel", "kubernetes", "cloud", "infra", "driver", "security", "vulnerability", "patch", "update", "nvidia", "amd", "intel"]:
-        if kw in title:
-            score += 1
-    # Antigüedad
-    published_parsed = item.get("published_parsed") or item.get("updated_parsed")
-    if published_parsed:
-        age = time.time() - time.mktime(published_parsed)
-        # Menos edad => mayor score
-        score += max(0, 3 - age / (60*60*12))  # 3 puntos si <12h
-    return score
-
 def load_sources(path="sources.yaml"):
     with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        data = yaml.safe_load(f) or {}
     return data.get("feeds", [])
 
-def fetch_all(feeds):
+def fetch_items(feeds):
     items = []
     for f in feeds:
         d = feedparser.parse(f["url"])
         for e in d.entries:
+            title = clean_html(getattr(e, "title", ""))
+            summary = clean_html(getattr(e, "summary", getattr(e, "description", "")))
+            link = getattr(e, "link", "") or getattr(e, "id", "")
+            published = getattr(e, "published_parsed", getattr(e, "updated_parsed", None))
             items.append({
                 "source": f["name"],
-                "title": clean_html(getattr(e, "title", "")),
-                "summary": clean_html(getattr(e, "summary", getattr(e, "description", ""))),
-                "link": getattr(e, "link", ""),
-                "published_parsed": getattr(e, "published_parsed", getattr(e, "updated_parsed", None)),
+                "title": title,
+                "summary": summary,
+                "link": link,
+                "published_parsed": published,
             })
-    # deduplicar por link o título
-    seen = set()
-    unique = []
+    # dedupe por link/título
+    seen, uniq = set(), []
     for it in items:
-        key = it["link"] or it["title"]
-        h = hashlib.md5(key.encode("utf-8")).hexdigest()
+        h = hashlib.md5((it["link"] or it["title"]).encode("utf-8")).hexdigest()
         if h not in seen:
-            seen.add(h)
-            unique.append(it)
-    # ordenar por score descendente
-    unique.sort(key=simple_score, reverse=True)
-    return unique[: MAX_ITEMS]
+            seen.add(h); uniq.append(it)
+    # ordenar recientes primero
+    uniq.sort(key=lambda x: x["published_parsed"] or time.gmtime(0), reverse=True)
+    return uniq
 
-def llm_summarize(items):
-    # Usa la API de OpenAI (o similar) si OPENAI_API_KEY está presente.
-    # Prompt en español, estilo conciso.
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return None
+def matches_keywords(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in KEYWORDS)
 
-    # Armamos contexto
-    bullets = []
-    for it in items:
-        bullets.append(f"- {it['title']} ({it['source']})")
-
-    prompt = f"""Eres un asistente experto que crea un resumen diario conciso (máx. {SUMMARY_LEN} puntos) en español sobre novedades técnicas en sistemas operativos, Linux, Windows, infraestructura TI, cloud y hardware. 
-Condensa las noticias en bullets claros con verbo al inicio (p. ej., "Lanzan...", "Corrigen...", "Anuncian...") y menciona producto/proyecto/empresa.
-Evita opinión y adornos. Mantén una línea por bullet. 
-
-Noticias:
-{chr(10).join(bullets)}
-"""
-
-    # Llamada rápida a la API de Chat Completions
-    try:
-        import json, requests
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        data = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": "Eres un asistente que resume noticias técnicas de forma muy concisa."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.2,
-        }
-        resp = requests.post(url, headers=headers, json=data, timeout=30)
-        resp.raise_for_status()
-        out = resp.json()
-        return out["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return None
-
-def rules_summary(items):
-    # Resumen simple por reglas: toma los N títulos más relevantes
-    top = items[:SUMMARY_LEN]
-    lines = []
-    for it in top:
-        lines.append(f"- {it['title']} ({it['source']})")
-    return "\n".join(lines)
+def generic_headline(it):
+    """Devuelve un titular corto y genérico por categoría detectada."""
+    t = it["title"].lower()
+    src = it["source"]
+    if any(k in t for k in ["linux","kernel","ubuntu","fedora","debian","arch","red hat"]):
+        return f"Novedades en Linux y ecosistema ({src})"
+    if "windows" in t or "microsoft" in t:
+        return f"Actualización y cambios en Windows ({src})"
+    if any(k in t for k in ["kubernetes","container","docker"]):
+        return f"Movimientos en contenedores/Kubernetes ({src})"
+    if any(k in t for k in ["aws","azure","gcp","cloud"]):
+        return f"Anuncios y lanzamientos en Cloud ({src})"
+    if any(k in t for k in ["cpu","gpu","intel","amd","nvidia","epyc","ryzen","xeon"]):
+        return f"Avances de hardware y drivers ({src})"
+    if any(k in t for k in ["security","vulnerability","patch"]):
+        return f"Parcheo y seguridad en plataformas ({src})"
+    if any(k in t for k in ["ai","machine learning","llm","model"]):
+        return f"Novedades en IA y modelos ({src})"
+    return f"Actualización relevante en tecnología ({src})"
 
 def make_digest(items):
-    date_lima = datetime.now().strftime("%Y-%m-%d")
-    header = f"📰 Resumen Tech • {date_lima}"
-    tldr = llm_summarize(items) if USE_LLM else None
-    if not tldr:
-        tldr = rules_summary(items)
+    # filtrar por keywords y tomar top N
+    filtered = [it for it in items if matches_keywords((it["title"] + " " + it["summary"]))]
 
-    body_lines = [header, "", "TL;DR", tldr, "", "Lecturas:"]
-    for it in items:
-        body_lines.append(f"• {it['title']} — {it['link']}")
-    body = "\n".join(body_lines)
-    # Sandbox Twilio limita a ~1600 caracteres
+    # si no hubo match, toma lo más reciente igualmente
+    if not filtered:
+        filtered = items[:MAX_ITEMS]
+    else:
+        filtered = filtered[:MAX_ITEMS]
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    lines = [f"📰 Resumen Tech • {date_str}", ""]
+
+    for it in filtered:
+        headline = generic_headline(it)
+        # enlace “Ver más” por ítem
+        lines.append(f"- {headline} — [Ver más]({it['link']})")
+
+    body = "\n".join(lines)
+
+    # Límite Sandbox ~1600 chars → reforzamos margen
     if len(body) > 1500:
-        # recortar lecturas a solo 3-4 enlaces
-        cutoff = body_lines.index("Lecturas:") + 1
-        body_lines = body_lines[:cutoff] + body_lines[cutoff:cutoff+3]
-        body = "\n".join(body_lines)
-        body += "\n… (+ más en tus feeds)"
+        lines = lines[:2 + MAX_ITEMS]  # header + MAX_ITEMS
+        body = "\n".join(lines)
+
     return body
 
 def main():
     feeds = load_sources()
-    items = fetch_all(feeds)
+    items = fetch_items(feeds)
     if not items:
         print("Sin items disponibles.")
         return
     message = make_digest(items)
-    # Enviar por WhatsApp
     ok, err = send_whatsapp(message)
     if ok:
         print("Mensaje enviado correctamente.")
     else:
         print("Error al enviar WhatsApp:", err)
-        # Fallback: imprime por consola
-        print("\n--- DIGEST ---\n")
-        print(message)
+        print("\n--- DEBUG ---\n", message)
 
 if __name__ == "__main__":
     main()
