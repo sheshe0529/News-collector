@@ -136,9 +136,11 @@ def make_digest(items):
     for it in items:
         body_lines.append(f"• {it['title']} — {it['link']}")
     body = "\n".join(body_lines)
-    # WhatsApp limita largo; si excede 4096, recortamos lecturas
-    if len(body) > 3900:
-        body_lines = body_lines[: body_lines.index("Lecturas:")+1] + body_lines[body_lines.index("Lecturas:")+1 : body_lines.index("Lecturas:")+1 + 5]
+    # Sandbox Twilio limita a ~1600 caracteres
+    if len(body) > 1500:
+        # recortar lecturas a solo 3-4 enlaces
+        cutoff = body_lines.index("Lecturas:") + 1
+        body_lines = body_lines[:cutoff] + body_lines[cutoff:cutoff+3]
         body = "\n".join(body_lines)
         body += "\n… (+ más en tus feeds)"
     return body
