@@ -16,6 +16,7 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install feedparser==6.0.11 python-dotenv==1.0.1 requests==2.32.3 twilio==9.3.1 PyYAML==6.0.2
       - name: Run digest
+        working-directory: ./tech-digest
         env:
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
